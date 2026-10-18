@@ -1,0 +1,18 @@
+schema_version = 1
+id = "localsend"
+name = "Send via LocalSend…"
+description = "Send the selected files or folders to a device on the local network with LocalSend."
+icon = "send"
+enabled = true
+menu = "submenu"
+
+[when]
+min_items = 1
+
+[run]
+runtime = "command"
+program = "/usr/local/bin/noctalia-localsend"
+args = ["{paths}"]
+mode = "whole-selection"
+working_directory = "home"
+confirm = false

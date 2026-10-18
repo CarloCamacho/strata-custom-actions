@@ -1,0 +1,21 @@
+schema_version = 1
+id = "isomount"
+name = "Mount / Eject ISO…"
+description = "Mount a disc image read-only, or eject it if it is already mounted."
+icon = "disc"
+enabled = true
+menu = "submenu"
+
+[when]
+kinds = ["file"]
+extensions = ["iso", "img"]
+min_items = 1
+
+[run]
+runtime = "command"
+program = "/usr/local/bin/iso-mount"
+args = ["{path}"]
+mode = "per-item"
+working_directory = "home"
+on_error = "continue"
+confirm = false

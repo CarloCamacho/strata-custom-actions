@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""iso-mount - mount or unmount an ISO/IMG from a file manager right-click.
+
+    iso-mount /path/to/disc.iso     # mount (or unmount, if already mounted)
+
+Uses udisks2 (`udisksctl loop-setup` + `mount`), so no root and no sudoers rule
+are needed - the polkit policy allows loop setup for the active local session,
+which is what a file-manager action runs in. Mounts read-only, under
+/run/media/<user>/<label>, and unmounting also releases the loop device.
+
+Exit codes: 0 success, 1 error.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+
+APP = "iso-mount"
+
+
+def run(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(args, capture_output=True, text=True)
+
+
+def notify(summary: str, body: str = "", urgent: bool = False) -> None:
+    if not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+        return
+    args = ["notify-send", "-a", "Mount ISO", "-i", "media-optical"]
+    if urgent:
+        args += ["-u", "critical"]
+    args += [summary, body]
+    try:
+        subprocess.run(args, check=False, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def fail(message: str) -> int:
+    print(f"{APP}: {message}", file=sys.stderr)
+    notify("Could not mount image", message, urgent=True)
+    return 1
+
+
+def loop_device(path: str) -> str | None:
+    res = run(["losetup", "-j", path])
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.split(":", 1)[0].strip()
+    return None
+
+
+def mount_point(device: str) -> str | None:
+    res = run(["findmnt", "-no", "TARGET", device])
+    out = res.stdout.strip()
+    return out.splitlines()[0] if out else None
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
+        return fail("usage: iso-mount <image.iso|image.img>")
+
+    path = os.path.abspath(os.path.expanduser(argv[1]))
+    if not os.path.isfile(path):
+        return fail(f"not a file: {path}")
+
+    device = loop_device(path)
+    target = mount_point(device) if device else None
+
+    # Already mounted -> unmount and release the loop device.
+    if device and target:
+        res = run(["udisksctl", "unmount", "-b", device, "--no-user-interaction"])
+        if res.returncode != 0:
+            return fail((res.stderr or res.stdout).strip() or "unmount failed")
+        run(["udisksctl", "loop-delete", "-b", device, "--no-user-interaction"])
+        notify("Ejected", os.path.basename(path))
+        return 0
+
+    # Loop device exists but is unmounted -> just mount it.
+    if device:
+        res = run(["udisksctl", "mount", "-b", device, "--no-user-interaction"])
+        if res.returncode != 0:
+            return fail((res.stderr or res.stdout).strip() or "mount failed")
+        target = mount_point(device)
+        notify("Mounted " + os.path.basename(path), target or device)
+        return 0
+
+    # Fresh image: attach a read-only loop device, then mount it.
+    res = run(["udisksctl", "loop-setup", "-f", path, "--read-only",
+               "--no-user-interaction"])
+    device = None
+    match = re.search(r"(/dev/loop\d+)", res.stdout + res.stderr)
+    if match:
+        device = match.group(1)
+    if res.returncode != 0 or not device:
+        detail = (res.stderr or res.stdout).strip()
+        if "Not authorized" in detail or "NotAuthorized" in detail:
+            detail = ("udisks (polkit) refused the request. This happens when the "
+                      "file manager was started outside your desktop session "
+                      "(from a terminal or SSH) - restart it from the app "
+                      "launcher and try again.")
+        return fail(detail or "could not set up a loop device")
+
+    res = run(["udisksctl", "mount", "-b", device, "--no-user-interaction"])
+    if res.returncode != 0:
+        run(["udisksctl", "loop-delete", "-b", device, "--no-user-interaction"])
+        return fail((res.stderr or res.stdout).strip() or "mount failed")
+
+    target = mount_point(device)
+    notify("Mounted " + os.path.basename(path), target or device)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(130)
